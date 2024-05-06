@@ -153,3 +153,67 @@ func (e *executer) Cd(path string) error {
 func (e *executer) Rm(path string) error {
 	return os.Remove(path)
 }
+
+type outputMessage struct {
+	Line  string
+	Error error
+}
+
+func (e *executer) SyncExecute(command string, flags ...string) (chan outputMessage, error) {
+	cmd := exec.Command(e.cliExecuter, e.cliParams, command)
+	cmd.Args = append(cmd.Args, flags...)
+	cmd.Stdin = os.Stdin
+	cmd.Stderr = os.Stderr
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	err = cmd.Start()
+	if err != nil {
+		return nil, err
+	}
+
+	buffer := make([]byte, 1)
+	output := make(chan outputMessage, 2)
+
+	go func() {
+	console:
+		for {
+			var line string
+		line:
+			for {
+				_, err := stdout.Read(buffer)
+				if err != nil {
+					output <- outputMessage{
+						Error: err,
+					}
+
+					break console
+				}
+
+				if string(buffer) == "\n" {
+					break line
+				}
+
+				line += string(buffer)
+			}
+
+			output <- outputMessage{
+				Line: line,
+			}
+
+			line = ""
+		}
+
+		err = cmd.Wait()
+		if err != nil {
+			output <- outputMessage{Error: err}
+		}
+
+		close(output)
+	}()
+
+	return output, nil
+}
