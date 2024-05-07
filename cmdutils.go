@@ -21,6 +21,9 @@ type Executer interface {
 	// Execute command with selected executer
 	Execute(command string, flags ...string) (string, error)
 
+	// Execute commands with selected executer and get results asynchronously
+	AsyncExecute(command string, flags ...string) (chan outputMessage, error)
+
 	// Clear console output
 	Clear()
 
@@ -161,6 +164,7 @@ type outputMessage struct {
 	IsError bool
 }
 
+// Execute commands with selected executer and get results asynchronously
 func (e *executer) AsyncExecute(command string, flags ...string) (chan outputMessage, error) {
 	cmd := exec.Command(e.cliExecuter, e.cliParams, command)
 	cmd.Args = append(cmd.Args, flags...)
