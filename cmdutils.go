@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 )
 
 type CLI uint8
@@ -155,17 +156,21 @@ func (e *executer) Rm(path string) error {
 }
 
 type outputMessage struct {
-	Line  string
-	Error error
+	Line    string
+	Error   error
+	IsError bool
 }
 
-func (e *executer) SyncExecute(command string, flags ...string) (chan outputMessage, error) {
+func (e *executer) AsyncExecute(command string, flags ...string) (chan outputMessage, error) {
 	cmd := exec.Command(e.cliExecuter, e.cliParams, command)
 	cmd.Args = append(cmd.Args, flags...)
-	cmd.Stdin = os.Stdin
-	cmd.Stderr = os.Stderr
 
 	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return nil, err
 	}
@@ -178,17 +183,19 @@ func (e *executer) SyncExecute(command string, flags ...string) (chan outputMess
 	buffer := make([]byte, 1)
 	output := make(chan outputMessage, 2)
 
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	// pipe for stderr
 	go func() {
 	console:
 		for {
 			var line string
 		line:
 			for {
-				_, err := stdout.Read(buffer)
+				_, err := stderr.Read(buffer)
 				if err != nil {
-					output <- outputMessage{
-						Error: err,
-					}
+					output <- outputMessage{Error: err}
 
 					break console
 				}
@@ -200,14 +207,59 @@ func (e *executer) SyncExecute(command string, flags ...string) (chan outputMess
 				line += string(buffer)
 			}
 
-			output <- outputMessage{
-				Line: line,
-			}
+			output <- outputMessage{Line: line, IsError: true}
 
 			line = ""
 		}
 
-		err = cmd.Wait()
+		wg.Done()
+	}()
+
+	wg.Add(1)
+	// pipe for stdout
+	go func() {
+	console:
+		for {
+			var line string
+		line:
+			for {
+				_, err := stdout.Read(buffer)
+				if err != nil {
+					output <- outputMessage{Error: err}
+
+					break console
+				}
+
+				if string(buffer) == "\n" {
+					break line
+				}
+
+				line += string(buffer)
+			}
+
+			output <- outputMessage{Line: line}
+
+			line = ""
+		}
+
+		wg.Done()
+	}()
+
+	// cancel on error
+	go func() {
+		wg.Wait()
+
+		err := cmd.Cancel()
+		if err != nil {
+			output <- outputMessage{Error: err}
+		}
+
+		close(output)
+	}()
+
+	// pipe for wait and close
+	go func() {
+		err := cmd.Wait()
 		if err != nil {
 			output <- outputMessage{Error: err}
 		}
