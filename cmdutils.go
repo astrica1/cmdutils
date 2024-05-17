@@ -21,6 +21,9 @@ type Executer interface {
 	// Execute command with selected executer
 	Execute(command string, flags ...string) (string, error)
 
+	// Execute command with selected executer in Async mode
+	AsyncExecute(command string, flags ...string) (chan OutputMessage, error)
+
 	// Clear console output
 	Clear()
 
@@ -38,11 +41,15 @@ type Executer interface {
 
 	// Remove file or directory of given path
 	Rm(path string) error
+
+	// Debug mode
+	Debug()
 }
 
 type executer struct {
 	cliExecuter string
 	cliParams   string
+	isDebug     bool
 }
 
 func NewExecuter(cli CLI) Executer {
@@ -89,15 +96,23 @@ func NewExecuter(cli CLI) Executer {
 func (e *executer) Execute(command string, flags ...string) (string, error) {
 	cmd := exec.Command(e.cliExecuter, e.cliParams, command)
 	cmd.Args = append(cmd.Args, flags...)
-	cmd.Stdin = os.Stdin
-	cmd.Stderr = os.Stderr
+
+	if e.isDebug {
+		cmd.Stdin = os.Stdin
+		cmd.Stderr = os.Stderr
+	}
 
 	output, err := cmd.Output()
 	if err != nil {
-		log.Printf("Couldn't Run Command << %s >>\n", command)
+		log.Printf("Couldn't Run Command << %s >>\nerror: %s", command, err.Error())
 	}
 
 	return string(output), err
+}
+
+// Set to Debug mode
+func (e *executer) Debug() {
+	e.isDebug = true
 }
 
 // Clear console output
@@ -155,15 +170,20 @@ func (e *executer) Rm(path string) error {
 	return os.Remove(path)
 }
 
-type outputMessage struct {
-	Line    string
-	Error   error
-	IsError bool
+type OutputMessage struct {
+	Line     string
+	Error    error
+	IsStderr bool
 }
 
-func (e *executer) AsyncExecute(command string, flags ...string) (chan outputMessage, error) {
+func (e *executer) AsyncExecute(command string, flags ...string) (chan OutputMessage, error) {
 	cmd := exec.Command(e.cliExecuter, e.cliParams, command)
 	cmd.Args = append(cmd.Args, flags...)
+
+	if e.isDebug {
+		cmd.Stdin = os.Stdin
+		cmd.Stderr = os.Stderr
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -180,8 +200,9 @@ func (e *executer) AsyncExecute(command string, flags ...string) (chan outputMes
 		return nil, err
 	}
 
-	buffer := make([]byte, 1)
-	output := make(chan outputMessage, 2)
+	stderrBuffer := make([]byte, 1)
+	stdoutBuffer := make([]byte, 1)
+	output := make(chan OutputMessage, 10)
 
 	var wg sync.WaitGroup
 
@@ -193,21 +214,21 @@ func (e *executer) AsyncExecute(command string, flags ...string) (chan outputMes
 			var line string
 		line:
 			for {
-				_, err := stderr.Read(buffer)
+				_, err := stderr.Read(stderrBuffer)
 				if err != nil {
-					output <- outputMessage{Error: err}
+					output <- OutputMessage{Error: err}
 
 					break console
 				}
 
-				if string(buffer) == "\n" {
+				if string(stderrBuffer) == "\n" {
 					break line
 				}
 
-				line += string(buffer)
+				line += string(stderrBuffer)
 			}
 
-			output <- outputMessage{Line: line, IsError: true}
+			output <- OutputMessage{Line: line, IsStderr: true}
 
 			line = ""
 		}
@@ -223,21 +244,21 @@ func (e *executer) AsyncExecute(command string, flags ...string) (chan outputMes
 			var line string
 		line:
 			for {
-				_, err := stdout.Read(buffer)
+				_, err := stdout.Read(stdoutBuffer)
 				if err != nil {
-					output <- outputMessage{Error: err}
+					output <- OutputMessage{Error: err}
 
 					break console
 				}
 
-				if string(buffer) == "\n" {
+				if string(stdoutBuffer) == "\n" {
 					break line
 				}
 
-				line += string(buffer)
+				line += string(stdoutBuffer)
 			}
 
-			output <- outputMessage{Line: line}
+			output <- OutputMessage{Line: line}
 
 			line = ""
 		}
@@ -245,24 +266,14 @@ func (e *executer) AsyncExecute(command string, flags ...string) (chan outputMes
 		wg.Done()
 	}()
 
-	// cancel on error
-	go func() {
-		wg.Wait()
-
-		err := cmd.Cancel()
-		if err != nil {
-			output <- outputMessage{Error: err}
-		}
-
-		close(output)
-	}()
-
 	// pipe for wait and close
 	go func() {
 		err := cmd.Wait()
 		if err != nil {
-			output <- outputMessage{Error: err}
+			output <- OutputMessage{Error: err}
 		}
+
+		wg.Wait()
 
 		close(output)
 	}()
